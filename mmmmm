@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+#  __  __   ___    __  __   ___    __  __   ___    __  __   ___    __  __   ___    
+# |  |/  `.'   `. |  |/  `.'   `. |  |/  `.'   `. |  |/  `.'   `. |  |/  `.'   `.  
+# |   .-.  .-.   '|   .-.  .-.   '|   .-.  .-.   '|   .-.  .-.   '|   .-.  .-.   ' 
+# |  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  | 
+# |  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  | 
+# |  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  | 
+# |  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  ||  |  |  |  |  | 
+# |__|  |__|  |__||__|  |__|  |__||__|  |__|  |__||__|  |__|  |__||__|  |__|  |__|
+#  ediocre         apper           ulti            apper           anager
+
+### Variables
+db=".database.db"
+_domain=""
+declare -i max=50
+declare -i last=0
+declare -i start_port=2500
+
+help() {
+  cat << EOF
+ .-.   .-..-.   .-..-.   .-..-.   .-..-.   .-.
+ |  \`.'  ||  \`.'  ||  \`.'  ||  \`.'  ||  \`.'  |
+ | |\ /| || |\ /| || |\ /| || |\ /| || |\ /| |
+ \`-' \` \`-'\`-' \` \`-'\`-' \` \`-'\`-' \` \`-'\`-' \` \`-'
+ Mediocre  Mapper   Multi    Mapper   Manager
+
+ mmmmm --start (fileName) (difficulty) [password]
+       --stop (id)
+       --get
+       --get-list
+       --get-debug
+EOF
+}
+
+query_last() {
+  sqlite3 ${db} 'SELECT property_value FROM metadata WHERE ( property_name == "last" )LIMIT 1;'
+}
+
+create_tables() {
+  sqlite3 ${db} 'CREATE TABLE servers ( folder text NOT NULL, download text NOT NULL, difficulty text NOT NULL, port integer NOT NULL, password text, id integer PRIMARY KEY );'
+  sqlite3 ${db} 'CREATE TABLE metadata ( property_name text PRIMARY KEY, property_value text );'
+}
+
+get_next() { # ${last} ${max}
+  last="${1}"
+  max="${2}"
+  last=$(( ${last} % ${max} + 1 ))
+  last_flag=$(sqlite3 ${db} "SELECT EXISTS( SELECT 1 FROM servers WHERE id=${last} )")
+  if [[ ${last_flag} -eq 0 ]]; then
+    echo ${last}
+  else 
+    get_next ${last} ${max}
+  fi
+}
+
+get_download() { # ${audiofile}
+  url="$(curl -s -F "reqtype=fileupload" -F "fileToUpload=@\"${audiofile}\"" https://catbox.moe/user/api.php)"
+  echo "${url}"
+}
+
+build() { # ${filename} ${difficulty} ${password} 
+  filename=${1}
+  difficulty=${2}
+  password=${3}
+  id=$(get_next "$(query_last)" "${max}")
+  port=$(( ${start_port} + ${id} ))
+  folder="$(extract ${filename} ${id})"
+  audiofile="Songs/${folder}/$(jq --raw-output '.difficultyLevels[0].audioPath' "Songs/${folder}/info.json")"
+  download="$(get_download "${audiofile}")"
+  insert "${folder}" "${download}" "${difficulty}" "${port}" "${password}" "${id}"
+  deploy "${folder}" "${download}" "${difficulty}" "${port}" "${password}" "${id}"
+}
+
+insert() { # ${folder} ${download} ${difficulty} ${port} ${password} ${id}
+  folder="${1}"
+  download="${2}"
+  difficulty="${3}"
+  port="${4}"
+  password="${5}"
+  id="${6}"
+  
+  sqlite3 ${db} "INSERT INTO servers VALUES ( \"Songs/${folder}\", \"${download}\", \"${difficulty}\", \"${port}\", \"${password}\", \"${id}\" )"
+  sqlite3 ${db} "INSERT OR REPLACE INTO metadata ( property_name, property_value ) VALUES ( \"last\", \"${id}\" );"
+}
+
+extract() { # ${filename} ${id}
+  filename="${1}"
+  id="${2}"
+
+  mkdir "Songs/${id}/"
+  unzip -qq "${filename}" -d "Songs/${id}/"
+
+  echo "${id}/$( ls Songs/${id}/ )"
+}
+
+deploy() { # ${folder} ${download} ${difficulty} ${port} ${password} ${id}
+  pass=0
+  folder="${1}"
+  download="${2}"
+  difficulty="${3}"
+  port="${4}"
+  password="${5}"
+  id="${6}"
+
+  if [[ ${folder} == "" ]]; then
+    echo "Error: Folder can't be empty." 1>&2
+    pass=1
+  fi
+  if [[ ${download} == "" ]]; then
+    echo "Error: Download can't be empty." 1>&2
+    pass=1
+  fi
+  if [[ ${difficulty} == "" ]]; then
+    echo "Error: Difficulty can't be empty." 1>&2
+    pass=1
+  fi
+
+  if [[ ${pass} -eq 0 ]]; then
+    ip="$(curl -s 'v4.ipv6-test.com/api/myip.php')"
+    if [[ ${_domain} ]]; then
+      domain="${_domain}"
+    else
+      domain="$(curl -s "https://api.hackertarget.com/reversedns/?q=${ip}" | awk '{print $2}')"
+    fi
+
+    screen -dmS MMMM-${id} sh -c "node server.js --folder \"${folder}\" --download \"${download}\" --difficulty \"${difficulty}\" --port \"${port}\" --password \"${password}\"; bash"
+
+    if [[ ${domain} ]]; then
+      echo "${domain}:${port}"
+    else
+      echo "${ip}:${port}"
+    fi
+  fi
+}
+
+stop() { # ${id}
+  id=${1}
+  sqlite3 ${db} "DELETE FROM servers WHERE id = ${id};"
+  screen -S MMMM-${id} -X quit
+  timestamp="$(($(date +%s%N)/1000000))"
+  mkdir -p .archive/${timestamp}
+  mv "Songs/${id}" ".archive/${timestamp}"
+}
+
+get() {
+  sqlite3 ${db} 'SELECT * FROM servers' | while IFS="" read -r line || [ -n "${line}" ]
+  do
+    folderName="$(sed 's_Songs/[0-9]*/\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)_\1_' <<< "${line}")"
+    serverID="$(sed 's_Songs/[0-9]*/\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)_\6_' <<< "${line}")"
+    portNumber="$(sed 's_Songs/[0-9]*/\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)|\([^\|]*\)_\4_' <<< "${line}")"
+    image="$(jq --raw-output '.coverImagePath' "Songs/${serverID}/${folderName}/info.json")"
+
+cat << EOF
+      <div class="column is-one-fifth-fullhd is-one-quarter-widescreen is-one-third-desktop is-half-tablet">
+        <div class="card box has-shadow">
+          <div class="card-content">
+            <div class="media">
+              <div class="media-left">
+                <figure class="image is-96x96">
+                  <img src="Songs/${serverID}/${folderName}/${image}" alt="Cover image">
+                </figure>
+              </div>
+              <div class="media-content">
+                <p class="title is-4">Port: ${portNumber}</p>
+                <p class="subtitle is-6">${folderName}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+EOF
+  done
+}
+
+get-list() {
+  sqlite3 ${db} 'SELECT folder, id FROM servers' | while read -r lineID
+  do
+    folderName="$(sed 's_Songs/[0-9]*/\([^\|]*\)|\([^\|]*\)_\1_' <<< "${lineID}")"
+    serverID="$(sed 's_Songs/[0-9]*/\([^\|]*\)|\([^\|]*\)_\2_' <<< "${lineID}")"
+
+cat << EOF
+          <form method="POST" action="remove.php" id="remove-${serverID}">
+          <input type="hidden" name="serverID" value="${serverID}" form="remove-${serverID}">
+            <div class="field has-addons">
+              <div class="control">
+                <input class="input is-danger is-rounded" type="text" name="name-${serverID}" value="${serverID} — ${folderName}" form="remove-${serverID}" disabled>
+              </div>
+              <div class="control">
+                <button class="button is-danger is-rounded" type="submit" form="remove-${serverID}">
+                  Remove
+                </button>
+              </div>
+            </div>
+          </form> 
+          <br />
+EOF
+
+  done
+}
+
+if [[ ! -f ${db} ]]; then
+  create_tables
+fi
+
+case ${1} in
+  --start)
+    if [[ $# -eq 4 ]]; then
+      filename=${2}
+      difficulty=${3}
+      password=${4}
+      build ${filename} ${difficulty} ${password}
+    else 
+      help
+    fi
+    ;;
+  --stop)
+    if [[ $# -eq 2 ]];then
+      id=${2}
+      stop ${id}
+    else
+      help
+    fi
+    ;;
+  --get)
+    get
+    ;;
+  --get-list)
+    get-list
+    ;;
+  --get-debug)
+    sqlite3 ${db} 'SELECT * FROM servers'
+    ;;
+  --help|-h)
+    help
+    ;;
+  *)
+    help
+    ;;
+esac
