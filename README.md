@@ -10,6 +10,7 @@ Easily deploy and destroy multiple [MMMM](https://github.com/squeaksies/Mediocre
 * php
 * curl
 * sed
+* unzip
 * An HTTP server
 
 ### Usage
